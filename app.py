@@ -64,7 +64,8 @@ with st.sidebar:
     fico_forced[fico_ticker]["ret_annual"] = fico_ret
 
     st.subheader("📐 Parámetros BL")
-    tau = st.slider("τ (incertidumbre equilibrio)", 0.01, 0.30, 0.05, 0.01)
+    tau = st.slider("τ (incertidumbre equilibrio)", 0.01, 1.00, 0.05, 0.01,
+                help="0.01-0.10: rango estándar | >0.30: views dominan | 1.0: override total")
     risk_free = st.number_input("Rf anual", value=RF_ANNUAL, step=0.005, format="%.3f")
 
     st.subheader("🎯 Modo")
