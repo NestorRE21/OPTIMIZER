@@ -31,6 +31,7 @@ from engine import (
     calculate_drawdown, cumulative_return_for_period,
     portfolio_historical_returns, sector_exposure_from_weights,
     calculate_max_drawdown, nearest_psd,
+    export_portfolio_xlsx,
 )
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -331,7 +332,7 @@ with tab_optimize:
                                       height=350, margin=dict(t=40, b=30))
                     st.plotly_chart(fig, use_container_width=True)
 
-            # Pesos por perfil
+            # Pesos por perfil + descarga Excel
             st.subheader("Pesos por perfil")
             for pname, r in results.items():
                 with st.expander(f"📋 {pname}"):
@@ -344,6 +345,26 @@ with tab_optimize:
                     df_w["Peso%"] = df_w["Peso"].map("{:.2%}".format)
                     st.dataframe(df_w[df_w["Peso"] > 0.001][["Activo", "Clase", "Peso%"]],
                                  use_container_width=True, hide_index=True)
+
+                    # Descarga Excel
+                    returns_bt = returns.copy().replace([np.inf, -np.inf], np.nan).dropna(how="all").fillna(0.0)
+                    w_norm = w.reindex(returns_bt.columns).fillna(0.0)
+                    w_norm = w_norm / w_norm.sum() if w_norm.sum() > EPS else w_norm
+                    hist_p = returns_bt @ w_norm
+
+                    xlsx_bytes = export_portfolio_xlsx(
+                        weights=w, profile_name=pname,
+                        ret_bl=ret_bl, sigma_bl=sigma_bl,
+                        asset_metadata=metadata,
+                        hist_returns=hist_p, benchmark_returns=bmk,
+                    )
+                    fname = f"coril_{pname.replace(' ', '_').replace('/', '-')}.xlsx"
+                    st.download_button(
+                        f"⬇️ Descargar {pname} (Excel)",
+                        data=xlsx_bytes, file_name=fname,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"dl_opt_{pname}",
+                    )
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -507,46 +528,23 @@ with tab_explorer:
             df_sect["Peso"] = df_sect["Peso"].map("{:.1%}".format)
             st.dataframe(df_sect, use_container_width=True, hide_index=True)
 
-        # ── Descargar portafolio
+        # ── Descargar portafolio como Excel
         st.divider()
         st.subheader("📥 Descargar portafolio")
 
-        # CSV con pesos y métricas
-        export_rows = []
-        for asset, peso in w_point.sort_values(ascending=False).items():
-            clase = "RV" if asset in sel_eq else "RF"
-            beta_a = metadata.loc[asset, "beta"] if asset in metadata.index else np.nan
-            ret_a = ret_bl.loc[asset] if asset in ret_bl.index else np.nan
-            export_rows.append({
-                "Activo": asset, "Clase": clase, "Peso": round(peso, 6),
-                "Beta": round(float(beta_a), 4) if pd.notna(beta_a) else None,
-                "Ret_BL": round(float(ret_a), 6) if pd.notna(ret_a) else None,
-            })
-        df_export = pd.DataFrame(export_rows)
-
-        # Agregar fila de métricas
-        metrics_row = pd.DataFrame([{
-            "Activo": "--- MÉTRICAS ---", "Clase": "",
-            "Peso": w_point.sum(),
-            "Beta": beta_p,
-            "Ret_BL": ret_p,
-        }])
-        summary_row = pd.DataFrame([{
-            "Activo": f"Perfil: {selected_profile} | Punto: {punto}",
-            "Clase": f"Vol: {vol_p:.2%}",
-            "Peso": f"Sharpe: {sharpe_p:.3f}",
-            "Beta": f"MaxDD: {max_dd:.2%}",
-            "Ret_BL": f"Ret.Hist: {ann_ret_hist:.2%}",
-        }])
-        df_download = pd.concat([df_export, metrics_row, summary_row], ignore_index=True)
-
-        csv = df_download.to_csv(index=False)
+        xlsx_explorer = export_portfolio_xlsx(
+            weights=w_point, profile_name=selected_profile,
+            ret_bl=ret_bl, sigma_bl=sigma_bl,
+            asset_metadata=metadata,
+            hist_returns=hist_ret, benchmark_returns=bmk,
+            punto_idx=punto,
+        )
+        fname_exp = f"coril_{selected_profile.replace(' ','_')}_punto{punto}.xlsx"
         st.download_button(
-            label=f"⬇️ Descargar punto {punto} — {selected_profile} (CSV)",
-            data=csv,
-            file_name=f"portafolio_{selected_profile.replace(' ', '_')}_punto{punto}.csv",
-            mime="text/csv",
-            use_container_width=True,
+            label=f"⬇️ Descargar punto {punto} — {selected_profile} (Excel)",
+            data=xlsx_explorer, file_name=fname_exp,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True, key="dl_explorer",
         )
 
 
@@ -656,3 +654,19 @@ with tab_manual:
                 c2.metric("Vol. hist.", f"{m['ann_vol']:.2%}")
                 c3.metric("Max DD", f"{m['max_dd']:.2%}")
                 c4.metric("Sharpe hist.", f"{m['sharpe']:.3f}")
+
+                # Descarga Excel
+                st.divider()
+                xlsx_manual = export_portfolio_xlsx(
+                    weights=w_m, profile_name="Manual",
+                    ret_bl=ret_bl, sigma_bl=sigma_bl,
+                    asset_metadata=metadata,
+                    hist_returns=hist, benchmark_returns=bmk,
+                )
+                st.download_button(
+                    "⬇️ Descargar portafolio manual (Excel)",
+                    data=xlsx_manual,
+                    file_name="coril_portafolio_manual.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="dl_manual",
+                )
