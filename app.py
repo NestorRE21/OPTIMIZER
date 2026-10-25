@@ -142,8 +142,8 @@ metadata  = st.session_state.metadata
 bmk       = st.session_state.benchmark
 ASSETS    = returns.columns.tolist()
 
-tab_universe, tab_views, tab_optimize, tab_backtest, tab_manual = st.tabs([
-    "🌐 Universo", "👁️ Views", "📈 Optimización", "📉 Backtest", "✏️ Manual"
+tab_universe, tab_views, tab_optimize, tab_explorer, tab_backtest, tab_manual = st.tabs([
+    "🌐 Universo", "👁️ Views", "📈 Optimización", "🔍 Explorador", "📉 Backtest", "✏️ Manual"
 ])
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -347,7 +347,211 @@ with tab_optimize:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# TAB 4: BACKTEST
+# TAB 4: EXPLORADOR DE FRONTERA
+# ═════════════════════════════════════════════════════════════════════════════
+
+with tab_explorer:
+    st.header("🔍 Explorador de frontera eficiente")
+
+    results = st.session_state.get("results", {})
+    if not results:
+        st.info("Ejecuta la optimización primero (pestaña Optimización).")
+    else:
+        ret_bl = st.session_state.ret_bl
+        sigma_bl = st.session_state.sigma_bl
+
+        profile_names = list(results.keys())
+        selected_profile = st.selectbox("Selecciona perfil", profile_names, key="explorer_profile")
+
+        r = results[selected_profile]
+        frontier = r["frontier"]
+        weights_f = r["weights_frontier"]
+        f_assets = r["frontier_assets"]
+        sel_eq = r.get("selected_equity", eq_assets)
+        n_points = len(frontier)
+
+        # ── Slider para seleccionar punto
+        punto = st.slider(
+            f"Punto en la frontera ({n_points} puntos)",
+            min_value=0, max_value=n_points - 1,
+            value=min(int(n_points * 0.75), n_points - 1),
+            key="explorer_punto"
+        )
+
+        # ── Extraer pesos del punto seleccionado
+        w_raw = weights_f[punto]
+        w_point = pd.Series(w_raw, index=f_assets, name=selected_profile)
+        w_point = w_point[w_point > 0.001]
+        if w_point.sum() > EPS:
+            w_point = w_point / w_point.sum()
+
+        ret_p = float(frontier[punto, 0])
+        vol_p = float(frontier[punto, 1])
+        sharpe_p = (ret_p - RF_ANNUAL) / vol_p if vol_p > EPS else 0.0
+
+        # ── Métricas del punto
+        st.subheader(f"Punto {punto} — {selected_profile}")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Ret. esperado", f"{ret_p:.2%}")
+        c2.metric("Volatilidad", f"{vol_p:.2%}")
+        c3.metric("Sharpe", f"{sharpe_p:.3f}")
+
+        # Beta
+        beta_vec = pd.to_numeric(
+            metadata.reindex(w_point.index)["beta"], errors="coerce"
+        ).fillna(1.0)
+        beta_p = float((w_point * beta_vec).sum())
+        c4.metric("Beta", f"{beta_p:.3f}")
+
+        # ── Histórico
+        returns_bt = returns.copy().replace([np.inf, -np.inf], np.nan).dropna(how="all").fillna(0.0)
+        w_norm = w_point.reindex(returns_bt.columns).fillna(0.0)
+        if w_norm.sum() > EPS:
+            w_norm = w_norm / w_norm.sum()
+        hist_ret = returns_bt @ w_norm
+        ann_ret_hist = float(np.exp(hist_ret.mean() * TRADING_DAYS) - 1.0)
+        ann_vol_hist = float(hist_ret.std(ddof=1) * np.sqrt(TRADING_DAYS))
+        max_dd = calculate_max_drawdown(hist_ret)
+
+        c5, c6, c7 = st.columns(3)
+        c5.metric("Ret. histórico", f"{ann_ret_hist:.2%}")
+        c6.metric("Vol. histórica", f"{ann_vol_hist:.2%}")
+        c7.metric("Max Drawdown", f"{max_dd:.2%}")
+
+        # ── Layout: stackplot + tabla lado a lado
+        col_chart, col_table = st.columns([3, 2])
+
+        with col_chart:
+            # ── Stackplot con plotly
+            st.subheader("Composición a lo largo de la frontera")
+
+            asset_classes = {a: ("RV" if a in sel_eq else "RF") for a in f_assets}
+
+            # Ordenar: RV primero, luego RF
+            order = sorted(f_assets, key=lambda a: (0 if asset_classes[a] == "RV" else 1,
+                                                      -weights_f[:, f_assets.index(a)].mean()))
+
+            rv_palette = ["#E45756", "#F58518", "#EECA3B", "#54A24B"]
+            rf_palette = ["#4C78A8", "#72B7B2", "#9ECAE9"]
+
+            fig_stack = go.Figure()
+            rv_i, rf_i = 0, 0
+            for asset in order:
+                idx_a = f_assets.index(asset)
+                y_vals = weights_f[:, idx_a]
+                if asset_classes[asset] == "RV":
+                    color = rv_palette[rv_i % len(rv_palette)]
+                    rv_i += 1
+                else:
+                    color = rf_palette[rf_i % len(rf_palette)]
+                    rf_i += 1
+                fig_stack.add_trace(go.Scatter(
+                    x=list(range(n_points)), y=y_vals,
+                    mode="lines", name=asset, stackgroup="one",
+                    line=dict(width=0.5, color=color),
+                    fillcolor=color,
+                ))
+
+            # Líneas de GMVP y punto seleccionado
+            idx_gmvp = int(np.argmin(frontier[:, 1]))
+            fig_stack.add_vline(x=idx_gmvp, line_dash="dot", line_color="black",
+                                annotation_text="GMVP", annotation_position="top")
+            fig_stack.add_vline(x=punto, line_dash="dash", line_color="#FF4B4B",
+                                line_width=2.5,
+                                annotation_text=f"← Punto {punto}",
+                                annotation_position="top right")
+
+            fig_stack.update_layout(
+                height=450,
+                yaxis=dict(tickformat=".0%", title="Peso"),
+                xaxis=dict(title="Punto en la frontera"),
+                legend=dict(orientation="h", yanchor="bottom", y=-0.25,
+                            xanchor="center", x=0.5, font=dict(size=10)),
+                margin=dict(t=30, b=80),
+            )
+            st.plotly_chart(fig_stack, use_container_width=True)
+
+        with col_table:
+            # ── Tabla de pesos
+            st.subheader("Pesos del portafolio")
+
+            rows_w = []
+            for asset, peso in w_point.sort_values(ascending=False).items():
+                clase = "RV" if asset in sel_eq else "RF"
+                beta_a = metadata.loc[asset, "beta"] if asset in metadata.index else np.nan
+                ret_a = ret_bl.loc[asset] if asset in ret_bl.index else np.nan
+                rows_w.append({
+                    "Activo": asset,
+                    "Clase": clase,
+                    "Peso": peso,
+                    "Beta": beta_a,
+                    "Ret.BL": ret_a,
+                })
+
+            df_weights = pd.DataFrame(rows_w)
+            df_display = df_weights.copy()
+            df_display["Peso"] = df_display["Peso"].map("{:.2%}".format)
+            df_display["Beta"] = df_display["Beta"].map(lambda x: f"{x:.3f}" if pd.notna(x) else "N/A")
+            df_display["Ret.BL"] = df_display["Ret.BL"].map(lambda x: f"{x:.2%}" if pd.notna(x) else "N/A")
+            st.dataframe(df_display, use_container_width=True, hide_index=True)
+
+            # ── Exposición RV / RF
+            eq_w = float(w_point[w_point.index.isin(sel_eq)].sum())
+            fi_w = 1.0 - eq_w
+            st.markdown(f"**RV:** {eq_w:.1%} &nbsp;|&nbsp; **RF:** {fi_w:.1%} &nbsp;|&nbsp; **Beta:** {beta_p:.3f}")
+
+            # ── Exposición sectorial
+            st.subheader("Sectores")
+            sect = sector_exposure_from_weights(w_point, metadata)
+            df_sect = pd.DataFrame({"Sector": sect.index, "Peso": sect.values})
+            df_sect["Peso"] = df_sect["Peso"].map("{:.1%}".format)
+            st.dataframe(df_sect, use_container_width=True, hide_index=True)
+
+        # ── Descargar portafolio
+        st.divider()
+        st.subheader("📥 Descargar portafolio")
+
+        # CSV con pesos y métricas
+        export_rows = []
+        for asset, peso in w_point.sort_values(ascending=False).items():
+            clase = "RV" if asset in sel_eq else "RF"
+            beta_a = metadata.loc[asset, "beta"] if asset in metadata.index else np.nan
+            ret_a = ret_bl.loc[asset] if asset in ret_bl.index else np.nan
+            export_rows.append({
+                "Activo": asset, "Clase": clase, "Peso": round(peso, 6),
+                "Beta": round(float(beta_a), 4) if pd.notna(beta_a) else None,
+                "Ret_BL": round(float(ret_a), 6) if pd.notna(ret_a) else None,
+            })
+        df_export = pd.DataFrame(export_rows)
+
+        # Agregar fila de métricas
+        metrics_row = pd.DataFrame([{
+            "Activo": "--- MÉTRICAS ---", "Clase": "",
+            "Peso": w_point.sum(),
+            "Beta": beta_p,
+            "Ret_BL": ret_p,
+        }])
+        summary_row = pd.DataFrame([{
+            "Activo": f"Perfil: {selected_profile} | Punto: {punto}",
+            "Clase": f"Vol: {vol_p:.2%}",
+            "Peso": f"Sharpe: {sharpe_p:.3f}",
+            "Beta": f"MaxDD: {max_dd:.2%}",
+            "Ret_BL": f"Ret.Hist: {ann_ret_hist:.2%}",
+        }])
+        df_download = pd.concat([df_export, metrics_row, summary_row], ignore_index=True)
+
+        csv = df_download.to_csv(index=False)
+        st.download_button(
+            label=f"⬇️ Descargar punto {punto} — {selected_profile} (CSV)",
+            data=csv,
+            file_name=f"portafolio_{selected_profile.replace(' ', '_')}_punto{punto}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# TAB 5: BACKTEST
 # ═════════════════════════════════════════════════════════════════════════════
 
 with tab_backtest:
