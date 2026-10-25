@@ -106,16 +106,6 @@ FICO_PEN = {
 
 FICO_FORCED = FICO_USD   # ← cambiar a FICO_PEN para soles
 
-# ── Layout Excel ──────────────────────────────────────────────────────────────
-REGION_ROW     = 0
-SECTOR_ROW     = 1
-CURRENCY_ROW   = 2
-INSTRUMENT_ROW = 3
-BETA_ROW       = 4
-TICKER_ROW     = 5
-DATA_START_ROW = 6
-DATE_COL_CANDIDATES = ["Date", "Fecha", "date", "fecha"]
-
 # ── Benchmark ─────────────────────────────────────────────────────────────────
 BENCHMARK_TICKER = "^GSPC"
 
@@ -197,15 +187,8 @@ def sector_exposure_from_weights(weights, asset_metadata, sector_col="sector"):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# CARGA DE DATOS
+# CARGA DE DATOS — TODO DESDE YAHOO FINANCE
 # ═════════════════════════════════════════════════════════════════════════════
-
-def _clean_label(value):
-    if pd.isna(value):
-        return ""
-    value = str(value).strip()
-    return "" if value.lower() in ("nan", "none", "") else value
-
 
 def _remove_timezone(index):
     index = pd.to_datetime(index)
@@ -214,74 +197,72 @@ def _remove_timezone(index):
     return index
 
 
-def _detect_date_column(df):
-    for col in DATE_COL_CANDIDATES:
-        if col in df.columns:
-            return col
-    first_col = df.columns[0]
-    if pd.to_datetime(df[first_col], errors="coerce").notna().mean() >= 0.80:
-        return first_col
-    raise ValueError(f"No se detectó columna de fechas: {df.columns.tolist()}")
+def download_equity_prices(tickers, period="5y"):
+    """Descarga precios de cierre ajustados de yfinance para una lista de tickers."""
+    if not tickers:
+        raise ValueError("Lista de tickers vacía.")
 
+    raw = yf.download(tickers, period=period, interval="1d", auto_adjust=True, progress=False)
+    if raw.empty:
+        raise ValueError(f"Sin datos de yfinance para: {tickers}")
 
-def load_single_sheet(file_path, sheet_name):
-    """Carga una hoja de Excel con el layout Coril (metadata en filas 0-5, datos desde 6)."""
-    raw = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
-    if raw.shape[0] <= DATA_START_ROW:
-        raise ValueError(f"Hoja '{sheet_name}': solo {raw.shape[0]} filas.")
+    if isinstance(raw.columns, pd.MultiIndex):
+        prices = raw["Close"].copy()
+    else:
+        prices = raw[["Close"]].copy()
+        prices.columns = tickers if len(tickers) == 1 else prices.columns
 
-    region_vals     = raw.iloc[REGION_ROW].map(_clean_label)
-    sector_vals     = raw.iloc[SECTOR_ROW].map(_clean_label)
-    currency_vals   = raw.iloc[CURRENCY_ROW].map(_clean_label)
-    instrument_vals = raw.iloc[INSTRUMENT_ROW].map(_clean_label)
-    beta_raw        = raw.iloc[BETA_ROW]
-    ticker_vals     = raw.iloc[TICKER_ROW].map(_clean_label)
+    if isinstance(prices, pd.Series):
+        prices = prices.to_frame(name=tickers[0])
 
-    valid_cols = [i for i, t in enumerate(ticker_vals) if t and not t.startswith("Unnamed")]
-    if not valid_cols:
-        raise ValueError(f"Sin columnas válidas en '{sheet_name}'.")
-
-    columns = [ticker_vals.iloc[i].strip() for i in valid_cols]
-    data = raw.iloc[DATA_START_ROW:, valid_cols].copy()
-    data.columns = columns
-
-    dcol = _detect_date_column(data)
-    data[dcol] = pd.to_datetime(data[dcol], errors="coerce")
-    data = data.dropna(subset=[dcol]).set_index(dcol)
-    data.index = _remove_timezone(data.index)
-    data = data[~data.index.duplicated(keep="last")].sort_index()
-
-    candidates = [c for c in data.columns if c.strip() and not c.startswith("Unnamed") and c not in DATE_COL_CANDIDATES]
-    prices = data[candidates].apply(pd.to_numeric, errors="coerce")
+    prices.index = _remove_timezone(prices.index)
+    prices = prices.sort_index()
     prices = prices.replace(0, np.nan)
     prices[prices < 0] = np.nan
-    prices = prices.dropna(axis=1, how="all")
+    prices = prices.ffill(limit=MAX_STALE_DAYS).dropna(how="all")
 
+    # Descartar tickers con demasiados NaN
     miss_pct = prices.isna().mean()
-    valid = [a for a in miss_pct.index
-             if miss_pct[a] <= (MAX_MISSING_PCT_LATE if a in LATE_START_ASSETS else MAX_MISSING_PCT)]
-    prices = prices[valid].ffill(limit=MAX_STALE_DAYS).dropna(how="all")
+    valid = [t for t in miss_pct.index if miss_pct[t] <= MAX_MISSING_PCT]
+    dropped = [t for t in miss_pct.index if t not in valid]
+    if dropped:
+        print(f"  [WARN] Tickers descartados por exceso NaN: {dropped}")
+    prices = prices[valid].dropna(how="all")
 
+    if prices.empty:
+        raise ValueError("Todos los tickers descartados por datos insuficientes.")
+
+    return prices
+
+
+def build_equity_metadata(tickers):
+    """Construye metadata (sector, beta, moneda, región) desde yfinance .info."""
     meta_rows = []
-    for i, asset in zip(valid_cols, columns):
-        if asset not in prices.columns or asset in DATE_COL_CANDIDATES:
-            continue
-        meta_rows.append({
-            "asset": asset,
-            "region": region_vals.iloc[i] or "Sin clasificar",
-            "sector": sector_vals.iloc[i] or "Sin clasificar",
-            "moneda": currency_vals.iloc[i] or "Sin clasificar",
-            "instrumento": instrument_vals.iloc[i] or "Sin clasificar",
-            "beta": pd.to_numeric(beta_raw.iloc[i], errors="coerce"),
-            "asset_class": "Renta Variable",
-            "fuente": "Excel",
-        })
-
-    metadata = pd.DataFrame(meta_rows).set_index("asset").reindex(prices.columns)
-    return prices, metadata
+    for ticker in tickers:
+        try:
+            info = yf.Ticker(ticker).info
+            meta_rows.append({
+                "asset": ticker,
+                "sector": info.get("sector", "Sin clasificar"),
+                "region": info.get("country", "Sin clasificar"),
+                "moneda": info.get("currency", "USD"),
+                "instrumento": info.get("quoteType", "EQUITY"),
+                "beta": info.get("beta", np.nan),
+                "asset_class": "Renta Variable",
+                "fuente": "yfinance",
+            })
+        except Exception:
+            meta_rows.append({
+                "asset": ticker, "sector": "Sin clasificar",
+                "region": "Sin clasificar", "moneda": "USD",
+                "instrumento": "EQUITY", "beta": np.nan,
+                "asset_class": "Renta Variable", "fuente": "yfinance",
+            })
+    return pd.DataFrame(meta_rows).set_index("asset")
 
 
 def calculate_returns(price_data):
+    """Calcula log-returns diarios con winsorización."""
     prices = price_data.copy().apply(pd.to_numeric, errors="coerce")
     log_ret = np.log(prices / prices.shift(1))
     log_ret = log_ret.replace([np.inf, -np.inf], np.nan).dropna(how="all")
@@ -292,14 +273,14 @@ def calculate_returns(price_data):
         log_ret = log_ret.clip(lower=lower, upper=upper, axis=1)
 
     col_nan = log_ret.isna().mean()
-    bad = [c for c in col_nan.index
-           if col_nan[c] > (MAX_MISSING_PCT_LATE if c in LATE_START_ASSETS else MAX_MISSING_PCT)]
+    bad = [c for c in col_nan.index if col_nan[c] > MAX_MISSING_PCT]
     if bad:
         log_ret = log_ret.drop(columns=bad)
     return log_ret.dropna(how="all").fillna(0.0)
 
 
 def build_synthetic_fico(fico_forced, date_index, seed=42):
+    """Genera log-returns sintéticos para FICO con la vol declarada."""
     rng = np.random.default_rng(seed)
     frames, meta_rows = {}, []
     for ticker, params in fico_forced.items():
@@ -316,6 +297,7 @@ def build_synthetic_fico(fico_forced, date_index, seed=42):
 
 
 def download_benchmark(ticker=BENCHMARK_TICKER, start=None, end=None):
+    """Descarga log-returns diarios del benchmark."""
     raw = yf.download(ticker, start=start, end=end, interval="1d", auto_adjust=True, progress=False)
     if raw.empty:
         raise ValueError(f"Sin datos para '{ticker}'.")
@@ -332,30 +314,24 @@ def download_benchmark(ticker=BENCHMARK_TICKER, start=None, end=None):
     return log_ret
 
 
-def load_full_universe(excel_file, sheet_names, fico_forced=None):
-    """Pipeline completo: Excel → returns → FICO → benchmark → alineación."""
+def load_full_universe(equity_tickers, fico_forced=None, period="5y"):
+    """Pipeline completo: yfinance → returns → FICO → benchmark → alineación."""
     if fico_forced is None:
         fico_forced = FICO_FORCED
 
-    # 1. Equity
-    all_prices, all_meta = [], []
-    for sheet in sheet_names:
-        p, m = load_single_sheet(excel_file, sheet)
-        all_prices.append(p)
-        all_meta.append(m)
-    eq_prices = pd.concat(all_prices, axis=1, join="outer").sort_index()
-    eq_prices = eq_prices.ffill(limit=MAX_STALE_DAYS).dropna(how="all")
-    eq_meta = pd.concat(all_meta, axis=0)
-    eq_prices = eq_prices.loc[:, ~eq_prices.columns.duplicated()]
-    eq_meta = eq_meta[~eq_meta.index.duplicated(keep="first")]
+    # 1. Descargar precios RV desde yfinance
+    eq_prices = download_equity_prices(equity_tickers, period=period)
 
-    # 2. Returns
+    # 2. Metadata desde yfinance .info
+    eq_meta = build_equity_metadata(list(eq_prices.columns))
+
+    # 3. Log-returns RV
     rets_eq = calculate_returns(eq_prices)
 
-    # 3. FICO
+    # 4. FICO sintético
     rets_fi, fi_meta = build_synthetic_fico(fico_forced, rets_eq.index)
 
-    # 4. Consolidar
+    # 5. Consolidar
     returns = pd.concat([rets_eq, rets_fi], axis=1, join="outer")
     returns = returns.replace([np.inf, -np.inf], np.nan).dropna(how="all").fillna(0.0)
 
@@ -363,13 +339,13 @@ def load_full_universe(excel_file, sheet_names, fico_forced=None):
     fico_assets = list(fico_forced.keys())
     asset_metadata = pd.concat([eq_meta, fi_meta], axis=0).reindex(returns.columns)
 
-    # 5. Benchmark
+    # 6. Benchmark
     idx = _remove_timezone(pd.to_datetime(returns.index))
     start = (idx.min() - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
     end = (idx.max() + pd.Timedelta(days=30)).strftime("%Y-%m-%d")
     bmk_ret = download_benchmark(start=start, end=end)
 
-    # 6. Alinear
+    # 7. Alinear
     returns.index = _remove_timezone(returns.index)
     bmk_ret.index = _remove_timezone(bmk_ret.index)
     returns, bmk_ret = returns.align(bmk_ret, join="inner", axis=0)
