@@ -100,12 +100,18 @@ def cached_load(_tickers, _period, _fico_dict):
 
 
 if equity_tickers and run_btn:
+    # Resetear estado previo — fuerza recálculo completo
+    st.session_state.bl_computed = False
+    st.session_state.pop("results", None)
+    st.session_state.pop("ret_bl", None)
+    st.session_state.pop("sigma_bl", None)
+    cached_load.clear()  # limpiar cache de datos
+
     with st.spinner("📊 Descargando tickers + benchmark de Yahoo Finance..."):
         try:
             returns, eq_assets, fico_assets, metadata, bmk = cached_load(
                 tuple(equity_tickers), period, fico_forced
             )
-            # Guardar en session_state
             st.session_state.returns = returns
             st.session_state.equity_assets = eq_assets
             st.session_state.fico_assets = fico_assets
@@ -114,7 +120,7 @@ if equity_tickers and run_btn:
             st.session_state.n_assets = len(returns.columns)
             st.session_state.data_loaded = True
 
-            # Calibrar
+            # Calibrar con tau actual del sidebar
             mkt_params = calibrate_market(returns, bmk, tau_method=tau)
             st.session_state.tau = mkt_params["tau"]
             st.session_state.lambda_mkt = mkt_params["lambda"]
@@ -292,9 +298,11 @@ with tab_optimize:
             st.session_state.results = results
             st.session_state.bl_computed = True
 
-        # ── Mostrar resultados
+        # ── Mostrar resultados (siempre desde session_state)
         results = st.session_state.get("results", {})
-        if results:
+        ret_bl = st.session_state.get("ret_bl")
+        sigma_bl = st.session_state.get("sigma_bl")
+        if results and ret_bl is not None:
             # Tabla comparativa
             st.subheader("Comparativa de perfiles")
             comp_data = []
@@ -375,11 +383,11 @@ with tab_explorer:
     st.header("🔍 Explorador de frontera eficiente")
 
     results = st.session_state.get("results", {})
-    if not results:
+    ret_bl = st.session_state.get("ret_bl")
+    sigma_bl = st.session_state.get("sigma_bl")
+    if not results or ret_bl is None:
         st.info("Ejecuta la optimización primero (pestaña Optimización).")
     else:
-        ret_bl = st.session_state.ret_bl
-        sigma_bl = st.session_state.sigma_bl
 
         profile_names = list(results.keys())
         selected_profile = st.selectbox("Selecciona perfil", profile_names, key="explorer_profile")
@@ -606,8 +614,10 @@ with tab_backtest:
 with tab_manual:
     st.header("Portafolio manual")
 
-    if not st.session_state.bl_computed:
-        st.info("Ejecuta BL primero.")
+    ret_bl_m = st.session_state.get("ret_bl")
+    sigma_bl_m = st.session_state.get("sigma_bl")
+    if not st.session_state.bl_computed or ret_bl_m is None:
+        st.info("Ejecuta BL primero (pestaña Optimización).")
     else:
         st.caption("Define pesos manuales. Deben sumar 1.0.")
         manual_assets = st.multiselect("Activos", ASSETS, default=ASSETS[:5], key="manual_assets")
@@ -628,8 +638,8 @@ with tab_manual:
                 w_m = pd.Series(weights_dict)
                 w_m = w_m / w_m.sum()
 
-                ret_bl = st.session_state.ret_bl
-                sigma_bl = st.session_state.sigma_bl
+                ret_bl = ret_bl_m
+                sigma_bl = sigma_bl_m
 
                 ret_exp = float(sum(w_m.get(a, 0) * ret_bl.loc[a] for a in w_m.index if a in ret_bl.index))
                 w_vec = w_m.reindex(ASSETS).fillna(0.0).to_numpy()
