@@ -50,14 +50,19 @@ if "bl_computed" not in st.session_state:
 with st.sidebar:
     st.title("⚙️ Configuración")
 
-    st.subheader("📁 Datos")
-    uploaded_file = st.file_uploader("Sube AF.xlsx (renta variable)", type=["xlsx"])
-    sheet_names = st.text_input("Hojas (separadas por coma)", value="USD").split(",")
-    sheet_names = [s.strip() for s in sheet_names if s.strip()]
+    st.subheader("📈 Tickers (Yahoo Finance)")
+    default_tickers = "SPY, GLD, GOOGL, BAP"
+    tickers_input = st.text_area(
+        "Tickers RV (separados por coma)",
+        value=default_tickers,
+        help="Usa tickers de Yahoo Finance: SPY, AAPL, BAP, BVN, SCCO, etc."
+    )
+    equity_tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
+    period = st.selectbox("Período de datos", ["3y", "5y", "10y", "max"], index=1)
 
     st.subheader("🏦 FICO")
     fico_currency = st.selectbox("Moneda FICO", ["USD", "PEN"])
-    fico_forced = FICO_USD if fico_currency == "USD" else FICO_PEN
+    fico_forced = FICO_USD.copy() if fico_currency == "USD" else FICO_PEN.copy()
     fico_ticker = list(fico_forced.keys())[0]
     fico_ret = st.number_input(f"Retorno anual {fico_ticker}", value=fico_forced[fico_ticker]["ret_annual"],
                                 min_value=-0.50, max_value=2.0, step=0.005, format="%.3f")
@@ -65,20 +70,18 @@ with st.sidebar:
 
     st.subheader("📐 Parámetros BL")
     tau = st.slider("τ (incertidumbre equilibrio)", 0.01, 1.00, 0.05, 0.01,
-                help="0.01-0.10: rango estándar | >0.30: views dominan | 1.0: override total")
+                    help="0.01-0.10: estándar | >0.30: views dominan | 1.0: override total")
     risk_free = st.number_input("Rf anual", value=RF_ANNUAL, step=0.005, format="%.3f")
 
     st.subheader("🎯 Modo")
     mode = st.radio("Pipeline", ["3 Perfiles (screening)", "5 Perfiles (activos fijos)"])
 
-    if mode == "5 Perfiles (activos fijos)":
+    if mode == "5 Perfiles (activos fijos)" and st.session_state.data_loaded:
         st.subheader("📌 Activos fijos (RV)")
-        # Se definen después de cargar datos
-        if st.session_state.data_loaded:
-            all_eq = st.session_state.equity_assets
-            default_fixed = [a for a in ["SPY PE Equity", "GLD PE Equity", "GOOGL PE Equity", "BAP PE Equity"] if a in all_eq]
-            fixed_equity = st.multiselect("Seleccionar activos RV", all_eq, default=default_fixed)
-            st.session_state.fixed_equity = fixed_equity
+        all_eq = st.session_state.equity_assets
+        default_fixed = [a for a in equity_tickers if a in all_eq]
+        fixed_equity = st.multiselect("Seleccionar activos RV", all_eq, default=default_fixed)
+        st.session_state.fixed_equity = fixed_equity
 
     run_btn = st.button("🚀 Ejecutar pipeline", type="primary", use_container_width=True)
     if st.session_state.data_loaded:
@@ -89,23 +92,17 @@ with st.sidebar:
 # CARGA DE DATOS
 # ═════════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=3600, show_spinner="Cargando datos...")
-def cached_load(file_bytes, sheets, _fico):
-    import tempfile, os
-    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
-        f.write(file_bytes)
-        tmp = f.name
-    try:
-        return load_full_universe(tmp, sheets, _fico)
-    finally:
-        os.unlink(tmp)
+@st.cache_data(ttl=3600, show_spinner="Descargando datos de Yahoo Finance...")
+def cached_load(_tickers, _period, _fico_dict):
+    # _fico_dict se pasa como dict normal; el underscore evita hash issues
+    return load_full_universe(_tickers, fico_forced=_fico_dict, period=_period)
 
 
-if uploaded_file is not None and run_btn:
-    with st.spinner("📊 Cargando universo + benchmark..."):
+if equity_tickers and run_btn:
+    with st.spinner("📊 Descargando tickers + benchmark de Yahoo Finance..."):
         try:
             returns, eq_assets, fico_assets, metadata, bmk = cached_load(
-                uploaded_file.getvalue(), sheet_names, fico_forced
+                tuple(equity_tickers), period, fico_forced
             )
             # Guardar en session_state
             st.session_state.returns = returns
@@ -130,7 +127,7 @@ if uploaded_file is not None and run_btn:
 
 elif not st.session_state.data_loaded:
     st.title("📊 Coril SAB — Optimizador BL")
-    st.info("👈 Sube el archivo Excel y presiona **Ejecutar pipeline** para comenzar.")
+    st.info("👈 Define tus tickers en el sidebar y presiona **Ejecutar pipeline** para comenzar.")
     st.stop()
 
 
