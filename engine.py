@@ -718,3 +718,281 @@ def performance_metrics(log_returns, benchmark=None):
             m["info_ratio"] = ir
 
     return m
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# EXPORTACIÓN A EXCEL — formato Coril SAB
+# ═════════════════════════════════════════════════════════════════════════════
+
+def export_portfolio_xlsx(
+    weights, profile_name, ret_bl, sigma_bl, asset_metadata,
+    hist_returns, benchmark_returns, fico_forced=None,
+    punto_idx=None,
+):
+    """
+    Genera un archivo Excel en memoria (BytesIO) con formato Coril SAB.
+    Hojas: Métricas, Composición, Wealth Index, Retornos Diarios,
+           Circular Sector/Región/Instrumento/Clase.
+    Retorna bytes listos para st.download_button.
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+    from openpyxl.chart import LineChart, Reference
+    import io
+
+    if fico_forced is None:
+        fico_forced = FICO_FORCED
+    fico_ret = list(fico_forced.values())[0]["ret_annual"]
+    fico_assets_list = list(fico_forced.keys())
+
+    # Normalizar pesos
+    w = weights.copy()
+    if w.sum() > EPS:
+        w = w / w.sum()
+
+    eq_w = float(w[~w.index.isin(fico_assets_list)].sum())
+    fi_w = float(w[w.index.isin(fico_assets_list)].sum())
+
+    # Estilos
+    BS = Side(style="thin", color="BFBFBF")
+    CB = Border(left=BS, right=BS, top=BS, bottom=BS)
+    FB = Font(name="Arial", size=10)
+    AC = Alignment(horizontal="center", vertical="center")
+    AL = Alignment(horizontal="left", vertical="center")
+    AR = Alignment(horizontal="right", vertical="center")
+    HX = "1F4E79"
+    RF_FILL = "DEEAF1"
+
+    def hf(c): return PatternFill("solid", fgColor=c)
+    def rf(): return PatternFill("solid", fgColor=RF_FILL)
+
+    def style_header(ws, row):
+        fn = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+        for cell in ws[row]:
+            if cell.value is None: continue
+            cell.fill = hf(HX); cell.font = fn; cell.alignment = AC; cell.border = CB
+
+    def autofit(ws, pad=4, mx=40):
+        for col in ws.columns:
+            mw = max((len(str(c.value)) for c in col if c.value is not None), default=8)
+            ws.column_dimensions[get_column_letter(col[0].column)].width = min(mw+pad, mx)
+
+    # Datos comunes
+    common_idx = hist_returns.index.intersection(benchmark_returns.index)
+    hist = hist_returns.loc[common_idx]
+    bmk = benchmark_returns.loc[common_idx]
+
+    # Métricas
+    ann_vol_p = float(hist.std(ddof=1) * np.sqrt(TRADING_DAYS))
+    max_dd_p = calculate_max_drawdown(hist)
+    ann_ret_p = float(sum(w.get(a, 0) * ret_bl.loc[a] for a in w.index if a in ret_bl.index))
+    contrib_eq = sum(w.get(a, 0) * ret_bl.loc[a] for a in w.index
+                     if a in ret_bl.index and a not in fico_assets_list)
+    contrib_fi = sum(w.get(a, 0) * ret_bl.loc[a] for a in w.index
+                     if a in ret_bl.index and a in fico_assets_list)
+    sharpe_p = (ann_ret_p - RF_ANNUAL) / ann_vol_p if ann_vol_p > EPS else np.nan
+    ann_ret_b = float(np.exp(bmk.mean() * TRADING_DAYS) - 1)
+    ann_vol_b = float(bmk.std(ddof=1) * np.sqrt(TRADING_DAYS))
+    sharpe_b = (ann_ret_b - RF_ANNUAL) / ann_vol_b if ann_vol_b > EPS else np.nan
+    max_dd_b = calculate_max_drawdown(bmk)
+    beta_vec = pd.to_numeric(asset_metadata.reindex(w.index)["beta"], errors="coerce").fillna(1.0)
+    beta_port = float((w * beta_vec).sum())
+
+    label = f"{profile_name}"
+    if punto_idx is not None:
+        label += f" | Punto {punto_idx}"
+
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    # ═══ Hoja 1: Métricas ═══
+    ws = wb.create_sheet("Métricas")
+    ws.merge_cells("A1:E1")
+    ws["A1"].value = f"CORIL SAB — {label} | RV={eq_w:.0%} / RF={fi_w:.0%}"
+    ws["A1"].font = Font(name="Arial", bold=True, size=13, color="FFFFFF")
+    ws["A1"].fill = hf(HX); ws["A1"].alignment = AC
+    ws.row_dimensions[1].height = 22
+
+    ws.merge_cells("A2:B2")
+    ws["A2"].value = f"Renta Fija: {fi_w:.0%}  →  FICO {fico_ret:.2%}"
+    ws["A2"].font = Font(name="Arial", bold=True, color="1F4E79", size=10)
+    ws["A2"].fill = hf("DEEAF1"); ws["A2"].alignment = AC
+    ws.merge_cells("C2:E2")
+    ws["C2"].value = f"Equities: {eq_w:.0%}  →  retorno BL"
+    ws["C2"].font = Font(name="Arial", bold=True, color="843C0C", size=10)
+    ws["C2"].fill = hf("FCE4D6"); ws["C2"].alignment = AC
+
+    ws.append([])
+    ws.append(["RETORNO ESPERADO — DESGLOSE", "Portafolio", "", "", ""])
+    style_header(ws, 4)
+    for r in [
+        (f"  Equity ({eq_w:.0%}) × BL", contrib_eq, "", "", ""),
+        (f"  FICO   ({fi_w:.0%}) × {fico_ret:.2%}", contrib_fi, "", "", ""),
+        ("  Retorno esperado total", ann_ret_p, "", "", ""),
+    ]:
+        ws.append(list(r))
+    for ri, row in enumerate(ws.iter_rows(min_row=5, max_row=7), 5):
+        for ci, cell in enumerate(row, 1):
+            cell.fill = rf(); cell.border = CB
+            cell.font = Font(name="Arial", bold=(ri == 7), size=10)
+            cell.alignment = AL if ci == 1 else AR
+            if ci == 2 and isinstance(cell.value, float): cell.number_format = "0.00%"
+
+    ws.append([])
+    bmk_name = benchmark_returns.name if hasattr(benchmark_returns, 'name') else "Benchmark"
+    ws.append(["MÉTRICAS", "Portafolio", bmk_name, "Diferencia", ""])
+    style_header(ws, 9)
+    for r in [
+        ("Retorno Esperado Total", ann_ret_p, ann_ret_b, ann_ret_p - ann_ret_b),
+        ("Volatilidad Anual", ann_vol_p, ann_vol_b, ann_vol_p - ann_vol_b),
+        (f"Sharpe Ratio (Rf={RF_ANNUAL:.2%})", sharpe_p, sharpe_b, sharpe_p - sharpe_b),
+        ("Máximo Drawdown", max_dd_p, max_dd_b, max_dd_p - max_dd_b),
+        ("Beta Portafolio", beta_port, 1.00, beta_port - 1.00),
+        ("Tasa Libre de Riesgo (Rf)", RF_ANNUAL, RF_ANNUAL, 0.0),
+        ("Retorno FICO asumido", fico_ret, np.nan, np.nan),
+    ]:
+        ws.append([r[0], r[1], r[2], r[3], ""])
+    pct_rows = {10, 11, 12, 13, 16, 17}
+    for ri, row in enumerate(ws.iter_rows(min_row=10, max_row=16), 10):
+        for ci, cell in enumerate(row, 1):
+            cell.fill = rf(); cell.font = FB; cell.border = CB
+            cell.alignment = AL if ci == 1 else AR
+            if ci in {2,3,4} and isinstance(cell.value, float):
+                cell.number_format = "0.00%" if ri in pct_rows else "0.00"
+
+    ws.append([])
+    ws.append(["RENDIMIENTOS POR PERÍODO", "Portafolio", bmk_name, "Diferencia", ""])
+    style_header(ws, 18)
+    cy = hist.index.max().year
+    ytd_p, ytd_b = hist[hist.index.year == cy], bmk[bmk.index.year == cy]
+    for label_r, vp, vb in [
+        ("YTD", float(np.exp(ytd_p.sum())-1), float(np.exp(ytd_b.sum())-1)),
+        ("1 año", cumulative_return_for_period(hist, TRADING_DAYS), cumulative_return_for_period(bmk, TRADING_DAYS)),
+        ("2 años", cumulative_return_for_period(hist, TRADING_DAYS*2), cumulative_return_for_period(bmk, TRADING_DAYS*2)),
+        ("3 años", cumulative_return_for_period(hist, TRADING_DAYS*3), cumulative_return_for_period(bmk, TRADING_DAYS*3)),
+    ]:
+        diff = (vp-vb) if pd.notna(vp) and pd.notna(vb) else np.nan
+        ws.append([label_r, vp, vb, diff, ""])
+    for row in ws.iter_rows(min_row=19, max_row=22):
+        for ci, cell in enumerate(row, 1):
+            cell.fill = rf(); cell.font = FB; cell.border = CB
+            cell.alignment = AL if ci == 1 else AR
+            if ci in {2,3,4} and isinstance(cell.value, float): cell.number_format = "0.00%"
+    autofit(ws); ws.freeze_panes = "A5"
+
+    # ═══ Hoja 2: Composición ═══
+    ws2 = wb.create_sheet("Composición")
+    ws2.append(["Activo","Clase","Sector","Región","Instrumento","Peso","Beta","Vol (%)","Ret.BL","Contrib.Beta"])
+    style_header(ws2, 1)
+    for asset, peso in w.sort_values(ascending=False).items():
+        if peso < EPS: continue
+        clase = "RF" if asset in fico_assets_list else "EQ"
+        meta = asset_metadata.loc[asset] if asset in asset_metadata.index else {}
+        def g(d,k):
+            v = d.get(k,"N/A") if isinstance(d,dict) else (d[k] if k in d.index else "N/A")
+            return v if isinstance(v,str) else str(v)
+        ba = pd.to_numeric(asset_metadata.loc[asset,"beta"] if asset in asset_metadata.index else np.nan, errors="coerce")
+        va = float(np.sqrt(sigma_bl.loc[asset,asset])) if asset in sigma_bl.index else np.nan
+        ra = ret_bl.loc[asset] if asset in ret_bl.index else np.nan
+        ct = peso*ba if pd.notna(ba) else np.nan
+        ws2.append([asset, clase, g(meta,"sector"), g(meta,"region"), g(meta,"instrumento"),
+                    round(peso,6), round(float(ba),4) if pd.notna(ba) else None,
+                    round(float(va)*100,2) if pd.notna(va) else None,
+                    round(float(ra),6) if pd.notna(ra) else None,
+                    round(float(ct),6) if pd.notna(ct) else None])
+    n2 = w[w>=EPS].shape[0]
+    ws2.append(["TOTAL","","","","",f"=SUM(F2:F{1+n2})","","","",f"=SUM(J2:J{1+n2})"])
+    for row in ws2.iter_rows(min_row=2, max_row=n2+2):
+        for ci, cell in enumerate(row, 1):
+            cell.fill = rf(); cell.font = FB; cell.border = CB
+            cell.alignment = AL if ci<=5 else AR
+            if ci==6 and isinstance(cell.value,float): cell.number_format = "0.00%"
+            if ci==7 and isinstance(cell.value,float): cell.number_format = "0.000"
+            if ci==8 and isinstance(cell.value,float): cell.number_format = "0.00"
+            if ci in(9,10) and isinstance(cell.value,float): cell.number_format = "0.00%"
+    for cell in ws2[n2+2]: cell.font = Font(name="Arial",bold=True,size=10)
+    autofit(ws2); ws2.freeze_panes = "A2"
+
+    # ═══ Hoja 3: Wealth Index ═══
+    ws3 = wb.create_sheet("Wealth Index")
+    ws3.append(["Fecha", profile_name, bmk_name]); style_header(ws3, 1)
+    wp = np.exp(hist.cumsum())*100; wb_idx = np.exp(bmk.cumsum())*100
+    for dt, vp, vb in zip(hist.index.strftime("%Y-%m-%d"), wp.round(4).values, wb_idx.round(4).values):
+        ws3.append([dt, float(vp), float(vb)])
+    for row in ws3.iter_rows(min_row=2):
+        for ci, cell in enumerate(row, 1):
+            cell.fill = rf(); cell.font = FB; cell.border = CB
+            cell.alignment = AR if ci>1 else AL
+            if ci in(2,3) and isinstance(cell.value,float): cell.number_format = "0.00"
+    autofit(ws3); ws3.freeze_panes = "A2"
+    n_wi = len(hist)
+
+    # ═══ Hoja 4: Retornos Diarios ═══
+    ws4 = wb.create_sheet("Retornos Diarios")
+    ws4.append(["Fecha", profile_name, bmk_name, "Drawdown Port.", "Drawdown Bench."])
+    style_header(ws4, 1)
+    dd_p = calculate_drawdown(hist); dd_b = calculate_drawdown(bmk)
+    for dt, rp, rb, dp, db in zip(hist.index.strftime("%Y-%m-%d"),
+        hist.values, bmk.values, dd_p.values, dd_b.values):
+        ws4.append([dt, round(float(rp),6), round(float(rb),6), round(float(dp),6), round(float(db),6)])
+    for row in ws4.iter_rows(min_row=2):
+        for ci, cell in enumerate(row, 1):
+            cell.fill = rf(); cell.font = FB; cell.border = CB
+            cell.alignment = AR if ci>1 else AL
+            if ci in(2,3) and isinstance(cell.value,float): cell.number_format = "0.0000%"
+            if ci in(4,5) and isinstance(cell.value,float): cell.number_format = "0.00%"
+    autofit(ws4); ws4.freeze_panes = "A2"
+
+    # ═══ Hojas Circulares ═══
+    for sn, mc, al in [("Circular Sector","sector","Sector"),
+                       ("Circular Región","region","Región"),
+                       ("Circular Instrumento","instrumento","Instrumento")]:
+        wsX = wb.create_sheet(sn)
+        wsX.append([al, "Peso"]); style_header(wsX, 1)
+        agg = {}
+        for asset, peso in w.items():
+            if peso < EPS: continue
+            val = asset_metadata.loc[asset, mc] if asset in asset_metadata.index else "N/A"
+            val = val if isinstance(val, str) else str(val)
+            agg[val] = agg.get(val, 0) + peso
+        for k, v in sorted(agg.items(), key=lambda x: -x[1]):
+            wsX.append([k, round(v, 6)])
+        for row in wsX.iter_rows(min_row=2):
+            for ci, cell in enumerate(row, 1):
+                cell.fill = rf(); cell.font = FB; cell.border = CB
+                cell.alignment = AL if ci==1 else AR
+                if ci==2 and isinstance(cell.value, float): cell.number_format = "0.00%"
+        autofit(wsX)
+
+    ws8 = wb.create_sheet("Circular Clase")
+    ws8.append(["Clase","Peso"]); style_header(ws8, 1)
+    for k, v in [("Renta Variable (EQ)", eq_w), ("Renta Fija (RF)", fi_w)]:
+        ws8.append([k, round(v, 6)])
+    for row in ws8.iter_rows(min_row=2):
+        for ci, cell in enumerate(row, 1):
+            cell.fill = rf(); cell.font = FB; cell.border = CB
+            cell.alignment = AL if ci==1 else AR
+            if ci==2 and isinstance(cell.value, float): cell.number_format = "0.00%"
+    autofit(ws8)
+
+    # ═══ Gráfico Wealth ═══
+    ws9 = wb.create_sheet("Gráfico Wealth")
+    chart = LineChart()
+    chart.title = f"Wealth Index — {profile_name} vs {bmk_name} (Base 100)"
+    chart.style = 10; chart.y_axis.title = "Índice (Base 100)"
+    chart.x_axis.title = "Fecha"; chart.height = 14; chart.width = 26
+    chart.add_data(Reference(ws3, min_col=2, min_row=1, max_row=n_wi+1), titles_from_data=True)
+    chart.add_data(Reference(ws3, min_col=3, min_row=1, max_row=n_wi+1), titles_from_data=True)
+    chart.set_categories(Reference(ws3, min_col=1, min_row=2, max_row=n_wi+1))
+    chart.series[0].graphicalProperties.line.solidFill = "1F77B4"
+    chart.series[0].graphicalProperties.line.width = 20000
+    chart.series[1].graphicalProperties.line.solidFill = "808080"
+    chart.series[1].graphicalProperties.line.width = 15000
+    ws9.add_chart(chart, "A1")
+
+    # Guardar en memoria
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
