@@ -31,7 +31,7 @@ from engine import (
     calculate_drawdown, cumulative_return_for_period,
     portfolio_historical_returns, sector_exposure_from_weights,
     calculate_max_drawdown, nearest_psd,
-    export_portfolio_xlsx,
+    export_portfolio_xlsx, project_to_horizon,
 )
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -59,7 +59,23 @@ with st.sidebar:
         help="Usa tickers de Yahoo Finance: SPY, AAPL, BAP, BVN, SCCO, etc."
     )
     equity_tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
-    period = st.selectbox("Período de datos", ["3y", "5y", "10y", "max"], index=1)
+    period = st.selectbox("Historia de datos", ["3y", "5y", "10y", "max"], index=1,
+                          help="Cuántos años de precios históricos descargar de Yahoo Finance")
+
+    st.subheader("⏱️ Horizonte de inversión")
+    HORIZON_OPTIONS = {
+        "1 mes":    1/12,
+        "6 meses":  0.5,
+        "1 año":    1.0,
+        "2 años":   2.0,
+        "3 años":   3.0,
+        "4 años":   4.0,
+        "5 años":   5.0,
+        "10 años":  10.0,
+    }
+    horizon_label = st.selectbox("Horizonte", list(HORIZON_OPTIONS.keys()), index=2,
+                                  help="Período de tenencia del portafolio")
+    horizon_years = HORIZON_OPTIONS[horizon_label]
 
     st.subheader("🏦 FICO")
     fico_currency = st.selectbox("Moneda FICO", ["USD", "PEN"])
@@ -119,6 +135,8 @@ if equity_tickers and run_btn:
             st.session_state.benchmark = bmk
             st.session_state.n_assets = len(returns.columns)
             st.session_state.data_loaded = True
+            st.session_state.horizon_years = horizon_years
+            st.session_state.horizon_label = horizon_label
 
             # Calibrar con tau actual del sidebar
             mkt_params = calibrate_market(returns, bmk, tau_method=tau)
@@ -127,6 +145,7 @@ if equity_tickers and run_btn:
             st.session_state.mkt_params = mkt_params
 
             st.success(f"✅ {len(returns.columns)} activos | {len(returns)} días | "
+                       f"Horizonte: {horizon_label} | "
                        f"τ={mkt_params['tau']:.4f} | λ={mkt_params['lambda']:.4f}")
         except Exception as e:
             st.error(f"❌ Error cargando datos: {e}")
@@ -175,7 +194,21 @@ with tab_universe:
     cols[0].metric("τ", f"{mp['tau']:.4f}")
     cols[1].metric("λ", f"{mp['lambda']:.4f}")
     cols[2].metric("Sharpe BMK", f"{mp['sharpe_bmk']:.3f}")
-    cols[3].metric("Ret. BMK", f"{mp['bmk_ret_ann']:.2%}")
+    cols[3].metric("Ret. BMK anual", f"{mp['bmk_ret_ann']:.2%}")
+
+    # Proyección al horizonte
+    h_y = st.session_state.get("horizon_years", 1.0)
+    h_label = st.session_state.get("horizon_label", "1 año")
+    rf_horizon = (1.0 + RF_ANNUAL) ** h_y - 1.0
+    bmk_ret_horizon = (1.0 + mp["bmk_ret_ann"]) ** h_y - 1.0
+    bmk_vol_horizon = mp["bmk_vol_ann"] * np.sqrt(h_y)
+
+    st.subheader(f"Proyección al horizonte ({h_label})")
+    cols2 = st.columns(4)
+    cols2[0].metric("Rf horizonte", f"{rf_horizon:.2%}")
+    cols2[1].metric("Ret. BMK horizonte", f"{bmk_ret_horizon:.2%}")
+    cols2[2].metric("Vol. BMK horizonte", f"{bmk_vol_horizon:.2%}")
+    cols2[3].metric("Horizonte", h_label)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -365,6 +398,8 @@ with tab_optimize:
                         ret_bl=ret_bl, sigma_bl=sigma_bl,
                         asset_metadata=metadata,
                         hist_returns=hist_p, benchmark_returns=bmk,
+                        horizon_years=st.session_state.get("horizon_years", 1.0),
+                        horizon_label=st.session_state.get("horizon_label", "1 año"),
                     )
                     fname = f"coril_{pname.replace(' ', '_').replace('/', '-')}.xlsx"
                     st.download_button(
@@ -443,9 +478,23 @@ with tab_explorer:
         max_dd = calculate_max_drawdown(hist_ret)
 
         c5, c6, c7 = st.columns(3)
-        c5.metric("Ret. histórico", f"{ann_ret_hist:.2%}")
-        c6.metric("Vol. histórica", f"{ann_vol_hist:.2%}")
+        c5.metric("Ret. hist. (anual)", f"{ann_ret_hist:.2%}")
+        c6.metric("Vol. hist. (anual)", f"{ann_vol_hist:.2%}")
         c7.metric("Max Drawdown", f"{max_dd:.2%}")
+
+        # Proyección al horizonte
+        h_y = st.session_state.get("horizon_years", 1.0)
+        h_label = st.session_state.get("horizon_label", "1 año")
+        ret_horizon = (1.0 + ret_p) ** h_y - 1.0
+        vol_horizon = vol_p * np.sqrt(h_y)
+        rf_h = (1.0 + RF_ANNUAL) ** h_y - 1.0
+        sharpe_h = (ret_horizon - rf_h) / vol_horizon if vol_horizon > EPS else 0.0
+
+        st.caption(f"📐 Proyección al horizonte: **{h_label}**")
+        h1, h2, h3 = st.columns(3)
+        h1.metric(f"Ret. esperado ({h_label})", f"{ret_horizon:.2%}")
+        h2.metric(f"Vol. ({h_label})", f"{vol_horizon:.2%}")
+        h3.metric(f"Sharpe ({h_label})", f"{sharpe_h:.3f}")
 
         # ── Layout: stackplot + tabla lado a lado
         col_chart, col_table = st.columns([3, 2])
@@ -546,6 +595,8 @@ with tab_explorer:
             asset_metadata=metadata,
             hist_returns=hist_ret, benchmark_returns=bmk,
             punto_idx=punto,
+            horizon_years=st.session_state.get("horizon_years", 1.0),
+            horizon_label=st.session_state.get("horizon_label", "1 año"),
         )
         fname_exp = f"coril_{selected_profile.replace(' ','_')}_punto{punto}.xlsx"
         st.download_button(
@@ -672,6 +723,8 @@ with tab_manual:
                     ret_bl=ret_bl, sigma_bl=sigma_bl,
                     asset_metadata=metadata,
                     hist_returns=hist, benchmark_returns=bmk,
+                    horizon_years=st.session_state.get("horizon_years", 1.0),
+                    horizon_label=st.session_state.get("horizon_label", "1 año"),
                 )
                 st.download_button(
                     "⬇️ Descargar portafolio manual (Excel)",
