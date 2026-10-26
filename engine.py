@@ -50,15 +50,15 @@ PROFILE_MAX_DRAWDOWN = {
 }
 
 PROFILE_MIN_BETA = {
-    "Conservador": 0.40,
-    "Moderado":    0.60,
-    "Agresivo":    0.80,
+    "Conservador": 0.20,
+    "Moderado":    0.40,
+    "Agresivo":    0.50,
 }
 
 PROFILE_MAX_BETA = {
-    "Conservador": 0.90,
-    "Moderado":    1.10,
-    "Agresivo":    1.90,
+    "Conservador": 1.10,
+    "Moderado":    1.60,
+    "Agresivo":    2.50,
 }
 
 PROFILE_EXCLUSIONS = {
