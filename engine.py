@@ -197,23 +197,102 @@ def _remove_timezone(index):
     return index
 
 
-def download_equity_prices(tickers, period="5y"):
-    """Descarga precios de cierre ajustados de yfinance para una lista de tickers."""
-    if not tickers:
+def _load_tickers_from_excel(excel_file, sheet_name="USD"):
+    """Lee tickers + metadata (sector, región, beta) de la hoja del Excel Coril.
+
+    Layout: fila 1=Región, 2=Sector, 3=Moneda, 4=Instrumento, 5=Beta,
+            fila 6=tickers (desde col B), datos desde fila 7.
+    Retorna (lista_tickers_bbg, metadata_df).
+    """
+    raw = pd.read_excel(excel_file, sheet_name=sheet_name, header=None)
+
+    region_row     = raw.iloc[0]
+    sector_row     = raw.iloc[1]
+    currency_row   = raw.iloc[2]
+    instrument_row = raw.iloc[3]
+    beta_row       = raw.iloc[4]
+    ticker_row     = raw.iloc[5]
+
+    tickers_bbg, meta_rows = [], []
+    for c in range(1, raw.shape[1]):  # desde columna B
+        tk = ticker_row.iloc[c]
+        if pd.isna(tk) or not str(tk).strip():
+            continue
+        tk = str(tk).strip()
+        tickers_bbg.append(tk)
+        meta_rows.append({
+            "asset":       tk,
+            "region":      str(region_row.iloc[c]).strip() if pd.notna(region_row.iloc[c]) else "Sin clasificar",
+            "sector":      str(sector_row.iloc[c]).strip() if pd.notna(sector_row.iloc[c]) else "Sin clasificar",
+            "moneda":      str(currency_row.iloc[c]).strip() if pd.notna(currency_row.iloc[c]) else "USD",
+            "instrumento": str(instrument_row.iloc[c]).strip() if pd.notna(instrument_row.iloc[c]) else "Acción",
+            "beta":        float(beta_row.iloc[c]) if pd.notna(beta_row.iloc[c]) else np.nan,
+            "asset_class": "Renta Variable",
+            "fuente":      "Excel (Bloomberg)",
+        })
+
+    metadata = pd.DataFrame(meta_rows).set_index("asset")
+    return tickers_bbg, metadata
+
+
+# ── Mapeo Bloomberg → Yahoo Finance (solo para descargar precios) ─────────────
+BBG_TO_YAHOO = {
+    "INRETC1 PE Equity": "INRETC1.LM",
+    "BVN PE Equity":      "BVN",
+    "NVDA PE Equity":     "NVDA",
+    "BAP PE Equity":      "BAP",
+    "SPY PE Equity":      "SPY",
+    "TSLA PE Equity":     "TSLA",
+    "CVERDEC1 PE Equity": "CVERDEC1.LM",
+    "AMZN PE Equity":     "AMZN",
+    "GOOGL PE Equity":    "GOOGL",
+    "SCCO PE Equity":     "SCCO",
+    "META PE Equity":     "META",
+    "MSFT PE Equity":     "MSFT",
+    "IFS PE Equity":      "IFS",
+    "HBM PE Equity":      "HBM",
+    "QQQ PE Equity":      "QQQ",
+    "AAPL PE Equity":     "AAPL",
+    "GLD PE Equity":      "GLD",
+    "AUNA PE Equity":     "AUNA",
+}
+
+
+def bbg_to_yahoo(ticker_bbg):
+    """Convierte ticker Bloomberg a Yahoo. Si no está en el mapeo,
+    toma el primer token (ej. 'XYZ PE Equity' -> 'XYZ')."""
+    if ticker_bbg in BBG_TO_YAHOO:
+        return BBG_TO_YAHOO[ticker_bbg]
+    return ticker_bbg.split()[0]
+
+
+def download_equity_prices(tickers_bbg, period="5y"):
+    """Descarga precios de yfinance. Recibe tickers BBG, los mapea a Yahoo,
+    descarga, y renombra las columnas de vuelta al formato BBG."""
+    if not tickers_bbg:
         raise ValueError("Lista de tickers vacía.")
 
-    raw = yf.download(tickers, period=period, interval="1d", auto_adjust=True, progress=False)
+    # Mapear BBG -> Yahoo
+    yahoo_map = {tk: bbg_to_yahoo(tk) for tk in tickers_bbg}
+    yahoo_tickers = list(yahoo_map.values())
+
+    raw = yf.download(yahoo_tickers, period=period, interval="1d",
+                      auto_adjust=True, progress=False)
     if raw.empty:
-        raise ValueError(f"Sin datos de yfinance para: {tickers}")
+        raise ValueError(f"Sin datos de yfinance para: {yahoo_tickers}")
 
     if isinstance(raw.columns, pd.MultiIndex):
         prices = raw["Close"].copy()
     else:
         prices = raw[["Close"]].copy()
-        prices.columns = tickers if len(tickers) == 1 else prices.columns
+        prices.columns = [yahoo_tickers[0]] if len(yahoo_tickers) == 1 else prices.columns
 
     if isinstance(prices, pd.Series):
-        prices = prices.to_frame(name=tickers[0])
+        prices = prices.to_frame(name=yahoo_tickers[0])
+
+    # Renombrar columnas Yahoo -> BBG
+    yahoo_to_bbg = {v: k for k, v in yahoo_map.items()}
+    prices = prices.rename(columns=yahoo_to_bbg)
 
     prices.index = _remove_timezone(prices.index)
     prices = prices.sort_index()
@@ -223,7 +302,8 @@ def download_equity_prices(tickers, period="5y"):
 
     # Descartar tickers con demasiados NaN
     miss_pct = prices.isna().mean()
-    valid = [t for t in miss_pct.index if miss_pct[t] <= MAX_MISSING_PCT]
+    valid = [t for t in miss_pct.index
+             if miss_pct[t] <= (MAX_MISSING_PCT_LATE if t in LATE_START_ASSETS else MAX_MISSING_PCT)]
     dropped = [t for t in miss_pct.index if t not in valid]
     if dropped:
         print(f"  [WARN] Tickers descartados por exceso NaN: {dropped}")
@@ -235,7 +315,6 @@ def download_equity_prices(tickers, period="5y"):
     return prices
 
 
-# ── Catálogo estático de tickers — yf.Ticker().info no funciona en Streamlit Cloud
 def _compute_beta(asset_returns, benchmark_returns):
     """Beta por regresión: Cov(activo, bmk) / Var(bmk)."""
     a, b = asset_returns.align(benchmark_returns, join="inner")
@@ -249,65 +328,6 @@ def _compute_beta(asset_returns, benchmark_returns):
     if var_b < EPS:
         return np.nan
     return float(np.cov(a, b, ddof=1)[0, 1] / var_b)
-
-
-def _fetch_ticker_info(ticker):
-    """Obtiene .info de yfinance. NO pasar session custom — yfinance 0.2.66+
-    exige curl_cffi y una requests.Session lanza error."""
-    try:
-        info = yf.Ticker(ticker).info
-        if info and isinstance(info, dict) and len(info) > 5:
-            return info
-    except Exception:
-        pass
-    try:
-        info = yf.Ticker(ticker).get_info()
-        if info and isinstance(info, dict) and len(info) > 5:
-            return info
-    except Exception:
-        pass
-    return {}
-
-
-def build_equity_metadata(tickers, asset_returns=None, benchmark_returns=None):
-    """Construye metadata desde yfinance .info.
-
-    El beta se intenta desde .info; si falla (común en Streamlit Cloud),
-    se CALCULA por regresión contra el benchmark usando los retornos
-    que sí descargaron correctamente.
-    """
-    meta_rows = []
-    for ticker in tickers:
-        row = {
-            "asset": ticker, "sector": "Sin clasificar",
-            "region": "Sin clasificar", "moneda": "USD",
-            "instrumento": "EQUITY", "beta": np.nan,
-            "asset_class": "Renta Variable", "fuente": "yfinance",
-        }
-        info = _fetch_ticker_info(ticker)
-        if info:
-            row["sector"]      = info.get("sector") or info.get("industry") or info.get("category") or "Sin clasificar"
-            row["region"]      = info.get("country") or "Sin clasificar"
-            row["moneda"]      = info.get("currency") or "USD"
-            row["instrumento"] = info.get("quoteType") or "EQUITY"
-            beta_val           = info.get("beta")
-            if beta_val is None:
-                beta_val = info.get("beta3Year")
-            try:
-                row["beta"] = float(beta_val) if beta_val is not None else np.nan
-            except (ValueError, TypeError):
-                row["beta"] = np.nan
-
-        # Fallback: calcular beta desde retornos si .info no lo dio
-        if pd.isna(row["beta"]) and asset_returns is not None and benchmark_returns is not None:
-            if ticker in asset_returns.columns:
-                beta_calc = _compute_beta(asset_returns[ticker], benchmark_returns)
-                if pd.notna(beta_calc):
-                    row["beta"] = beta_calc
-                    row["fuente"] = "beta calculado (regresión)"
-
-        meta_rows.append(row)
-    return pd.DataFrame(meta_rows).set_index("asset")
 
 
 def calculate_returns(price_data):
@@ -363,35 +383,34 @@ def download_benchmark(ticker=BENCHMARK_TICKER, start=None, end=None):
     return log_ret
 
 
-def load_full_universe(equity_tickers, fico_forced=None, period="5y"):
-    """Pipeline completo: yfinance → returns → FICO → benchmark → alineación."""
+def load_full_universe(excel_file, sheet_name="USD", fico_forced=None, period="5y"):
+    """Pipeline híbrido: Excel (tickers + metadata) → Yahoo (precios) →
+    returns → FICO → benchmark → alineación.
+
+    - Lista de tickers y metadata (sector, región, beta) vienen del Excel.
+    - Precios se descargan de Yahoo vía yf.download (mapeo BBG → Yahoo).
+    """
     if fico_forced is None:
         fico_forced = FICO_FORCED
 
-    # 1. Descargar precios RV desde yfinance
-    eq_prices = download_equity_prices(equity_tickers, period=period)
+    # 1. Leer tickers + metadata del Excel
+    tickers_bbg, eq_meta = _load_tickers_from_excel(excel_file, sheet_name)
 
-    # 2. Log-returns RV
+    # 2. Descargar precios de Yahoo (mapea BBG → Yahoo internamente)
+    eq_prices = download_equity_prices(tickers_bbg, period=period)
+
+    # 3. Log-returns RV
     rets_eq = calculate_returns(eq_prices)
 
-    # 3. FICO sintético
+    # 4. FICO sintético
     rets_fi, fi_meta = build_synthetic_fico(fico_forced, rets_eq.index)
 
-    # 4. Benchmark (antes de metadata, para poder calcular beta por regresión)
+    # 5. Benchmark
     idx = _remove_timezone(pd.to_datetime(rets_eq.index))
     start = (idx.min() - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
     end = (idx.max() + pd.Timedelta(days=30)).strftime("%Y-%m-%d")
     bmk_ret = download_benchmark(start=start, end=end)
     bmk_ret.index = _remove_timezone(bmk_ret.index)
-
-    # 5. Metadata — pasa returns + benchmark para fallback de beta por regresión
-    rets_eq_tz = rets_eq.copy()
-    rets_eq_tz.index = _remove_timezone(rets_eq_tz.index)
-    eq_meta = build_equity_metadata(
-        list(eq_prices.columns),
-        asset_returns=rets_eq_tz,
-        benchmark_returns=bmk_ret,
-    )
 
     # 6. Consolidar
     returns = pd.concat([rets_eq, rets_fi], axis=1, join="outer")
@@ -399,7 +418,10 @@ def load_full_universe(equity_tickers, fico_forced=None, period="5y"):
 
     equity_assets = [a for a in eq_prices.columns if a in returns.columns]
     fico_assets = list(fico_forced.keys())
-    asset_metadata = pd.concat([eq_meta, fi_meta], axis=0).reindex(returns.columns)
+
+    # Metadata: solo activos que sobrevivieron (Excel + FICO)
+    eq_meta_valid = eq_meta.reindex([a for a in eq_meta.index if a in equity_assets])
+    asset_metadata = pd.concat([eq_meta_valid, fi_meta], axis=0).reindex(returns.columns)
 
     # 7. Alinear
     returns.index = _remove_timezone(returns.index)
