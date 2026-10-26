@@ -197,6 +197,12 @@ def _remove_timezone(index):
     return index
 
 
+def read_excel_tickers(excel_file, sheet_name="USD"):
+    """Wrapper público: lee solo (tickers, metadata) del Excel sin tocar Yahoo.
+    Úsalo para poblar el selector de activos en la UI."""
+    return _load_tickers_from_excel(excel_file, sheet_name)
+
+
 def _load_tickers_from_excel(excel_file, sheet_name="USD"):
     """Lee tickers + metadata (sector, región, beta) de la hoja del Excel Coril.
 
@@ -383,18 +389,28 @@ def download_benchmark(ticker=BENCHMARK_TICKER, start=None, end=None):
     return log_ret
 
 
-def load_full_universe(excel_file, sheet_name="USD", fico_forced=None, period="5y"):
+def load_full_universe(excel_file, sheet_name="USD", fico_forced=None, period="5y",
+                       selected_tickers=None):
     """Pipeline híbrido: Excel (tickers + metadata) → Yahoo (precios) →
     returns → FICO → benchmark → alineación.
 
     - Lista de tickers y metadata (sector, región, beta) vienen del Excel.
     - Precios se descargan de Yahoo vía yf.download (mapeo BBG → Yahoo).
+    - selected_tickers: subconjunto a optimizar; None = todos.
     """
     if fico_forced is None:
         fico_forced = FICO_FORCED
 
     # 1. Leer tickers + metadata del Excel
     tickers_bbg, eq_meta = _load_tickers_from_excel(excel_file, sheet_name)
+
+    # Filtrar por selección del usuario
+    if selected_tickers:
+        sel = set(selected_tickers)
+        tickers_bbg = [t for t in tickers_bbg if t in sel]
+        eq_meta = eq_meta.reindex([t for t in eq_meta.index if t in sel])
+        if not tickers_bbg:
+            raise ValueError("Ningún activo seleccionado está en el Excel.")
 
     # 2. Descargar precios de Yahoo (mapea BBG → Yahoo internamente)
     eq_prices = download_equity_prices(tickers_bbg, period=period)
