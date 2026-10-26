@@ -51,16 +51,14 @@ if "bl_computed" not in st.session_state:
 with st.sidebar:
     st.title("⚙️ Configuración")
 
-    st.subheader("📈 Tickers (Yahoo Finance)")
-    default_tickers = "SPY, GLD, GOOGL, BAP"
-    tickers_input = st.text_area(
-        "Tickers RV (separados por coma)",
-        value=default_tickers,
-        help="Usa tickers de Yahoo Finance: SPY, AAPL, BAP, BVN, SCCO, etc."
+    st.subheader("📁 Universo (Excel)")
+    uploaded_file = st.file_uploader(
+        "Sube AF.xlsx", type=["xlsx"],
+        help="Tickers + metadata (sector, región, beta) desde el Excel. Los precios se descargan de Yahoo."
     )
-    equity_tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
-    period = st.selectbox("Historia de datos", ["3y", "5y", "10y", "max"], index=1,
-                          help="Cuántos años de precios históricos descargar de Yahoo Finance")
+    sheet_name = st.text_input("Hoja", value="USD")
+    period = st.selectbox("Historia de precios (Yahoo)", ["3y", "5y", "10y", "max"], index=1,
+                          help="Cuántos años de precios descargar de Yahoo Finance")
 
     st.subheader("⏱️ Horizonte de inversión")
     HORIZON_OPTIONS = {
@@ -96,7 +94,7 @@ with st.sidebar:
     if mode == "5 Perfiles (activos fijos)" and st.session_state.data_loaded:
         st.subheader("📌 Activos fijos (RV)")
         all_eq = st.session_state.equity_assets
-        default_fixed = [a for a in equity_tickers if a in all_eq]
+        default_fixed = [a for a in ["SPY PE Equity", "GLD PE Equity", "GOOGL PE Equity", "BAP PE Equity"] if a in all_eq]
         fixed_equity = st.multiselect("Seleccionar activos RV", all_eq, default=default_fixed)
         st.session_state.fixed_equity = fixed_equity
 
@@ -109,24 +107,30 @@ with st.sidebar:
 # CARGA DE DATOS
 # ═════════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=3600, show_spinner="Descargando datos de Yahoo Finance...")
-def cached_load(_tickers, _period, _fico_dict):
-    # _fico_dict se pasa como dict normal; el underscore evita hash issues
-    return load_full_universe(_tickers, fico_forced=_fico_dict, period=_period)
+@st.cache_data(ttl=3600, show_spinner="Cargando Excel + precios de Yahoo...")
+def cached_load(_file_bytes, _sheet, _period, _fico_dict):
+    import tempfile, os
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+        f.write(_file_bytes)
+        tmp = f.name
+    try:
+        return load_full_universe(tmp, sheet_name=_sheet, fico_forced=_fico_dict, period=_period)
+    finally:
+        os.unlink(tmp)
 
 
-if equity_tickers and run_btn:
+if uploaded_file is not None and run_btn:
     # Resetear estado previo — fuerza recálculo completo
     st.session_state.bl_computed = False
     st.session_state.pop("results", None)
     st.session_state.pop("ret_bl", None)
     st.session_state.pop("sigma_bl", None)
-    cached_load.clear()  # limpiar cache de datos
+    cached_load.clear()
 
-    with st.spinner("📊 Descargando tickers + benchmark de Yahoo Finance..."):
+    with st.spinner("📊 Cargando Excel + descargando precios de Yahoo..."):
         try:
             returns, eq_assets, fico_assets, metadata, bmk = cached_load(
-                tuple(equity_tickers), period, fico_forced
+                uploaded_file.getvalue(), sheet_name, period, fico_forced
             )
             st.session_state.returns = returns
             st.session_state.equity_assets = eq_assets
@@ -153,7 +157,7 @@ if equity_tickers and run_btn:
 
 elif not st.session_state.data_loaded:
     st.title("📊 Coril SAB — Optimizador BL")
-    st.info("👈 Define tus tickers en el sidebar y presiona **Ejecutar pipeline** para comenzar.")
+    st.info("👈 Sube el Excel (AF.xlsx) y presiona **Ejecutar pipeline** para comenzar.")
     st.stop()
 
 
