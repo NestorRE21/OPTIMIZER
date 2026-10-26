@@ -252,28 +252,14 @@ def _compute_beta(asset_returns, benchmark_returns):
 
 
 def _fetch_ticker_info(ticker):
-    """Obtiene .info de yfinance probando varios métodos en cascada."""
-    # Método A: user-agent custom (evita bloqueo de IP en Streamlit Cloud)
-    try:
-        import requests
-        session = requests.Session()
-        session.headers["User-Agent"] = (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-        )
-        info = yf.Ticker(ticker, session=session).info
-        if info and isinstance(info, dict) and len(info) > 5:
-            return info
-    except Exception:
-        pass
-    # Método B: .info directo
+    """Obtiene .info de yfinance. NO pasar session custom — yfinance 0.2.66+
+    exige curl_cffi y una requests.Session lanza error."""
     try:
         info = yf.Ticker(ticker).info
         if info and isinstance(info, dict) and len(info) > 5:
             return info
     except Exception:
         pass
-    # Método C: .get_info()
     try:
         info = yf.Ticker(ticker).get_info()
         if info and isinstance(info, dict) and len(info) > 5:
