@@ -236,8 +236,60 @@ def download_equity_prices(tickers, period="5y"):
 
 
 # ── Catálogo estático de tickers — yf.Ticker().info no funciona en Streamlit Cloud
-def build_equity_metadata(tickers):
-    """Construye metadata (sector, beta, moneda, región) desde yfinance .info."""
+def _compute_beta(asset_returns, benchmark_returns):
+    """Beta por regresión: Cov(activo, bmk) / Var(bmk)."""
+    a, b = asset_returns.align(benchmark_returns, join="inner")
+    a = a.replace([np.inf, -np.inf], np.nan)
+    b = b.replace([np.inf, -np.inf], np.nan)
+    mask = a.notna() & b.notna()
+    a, b = a[mask], b[mask]
+    if len(a) < 30:
+        return np.nan
+    var_b = b.var(ddof=1)
+    if var_b < EPS:
+        return np.nan
+    return float(np.cov(a, b, ddof=1)[0, 1] / var_b)
+
+
+def _fetch_ticker_info(ticker):
+    """Obtiene .info de yfinance probando varios métodos en cascada."""
+    # Método A: user-agent custom (evita bloqueo de IP en Streamlit Cloud)
+    try:
+        import requests
+        session = requests.Session()
+        session.headers["User-Agent"] = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        )
+        info = yf.Ticker(ticker, session=session).info
+        if info and isinstance(info, dict) and len(info) > 5:
+            return info
+    except Exception:
+        pass
+    # Método B: .info directo
+    try:
+        info = yf.Ticker(ticker).info
+        if info and isinstance(info, dict) and len(info) > 5:
+            return info
+    except Exception:
+        pass
+    # Método C: .get_info()
+    try:
+        info = yf.Ticker(ticker).get_info()
+        if info and isinstance(info, dict) and len(info) > 5:
+            return info
+    except Exception:
+        pass
+    return {}
+
+
+def build_equity_metadata(tickers, asset_returns=None, benchmark_returns=None):
+    """Construye metadata desde yfinance .info.
+
+    El beta se intenta desde .info; si falla (común en Streamlit Cloud),
+    se CALCULA por regresión contra el benchmark usando los retornos
+    que sí descargaron correctamente.
+    """
     meta_rows = []
     for ticker in tickers:
         row = {
@@ -246,16 +298,28 @@ def build_equity_metadata(tickers):
             "instrumento": "EQUITY", "beta": np.nan,
             "asset_class": "Renta Variable", "fuente": "yfinance",
         }
-        try:
-            info = yf.Ticker(ticker).info or {}
+        info = _fetch_ticker_info(ticker)
+        if info:
             row["sector"]      = info.get("sector") or info.get("industry") or info.get("category") or "Sin clasificar"
             row["region"]      = info.get("country") or "Sin clasificar"
             row["moneda"]      = info.get("currency") or "USD"
             row["instrumento"] = info.get("quoteType") or "EQUITY"
-            beta_val           = info.get("beta") or info.get("beta3Year")
-            row["beta"]        = float(beta_val) if beta_val is not None else np.nan
-        except Exception:
-            pass
+            beta_val           = info.get("beta")
+            if beta_val is None:
+                beta_val = info.get("beta3Year")
+            try:
+                row["beta"] = float(beta_val) if beta_val is not None else np.nan
+            except (ValueError, TypeError):
+                row["beta"] = np.nan
+
+        # Fallback: calcular beta desde retornos si .info no lo dio
+        if pd.isna(row["beta"]) and asset_returns is not None and benchmark_returns is not None:
+            if ticker in asset_returns.columns:
+                beta_calc = _compute_beta(asset_returns[ticker], benchmark_returns)
+                if pd.notna(beta_calc):
+                    row["beta"] = beta_calc
+                    row["fuente"] = "beta calculado (regresión)"
+
         meta_rows.append(row)
     return pd.DataFrame(meta_rows).set_index("asset")
 
@@ -321,16 +385,29 @@ def load_full_universe(equity_tickers, fico_forced=None, period="5y"):
     # 1. Descargar precios RV desde yfinance
     eq_prices = download_equity_prices(equity_tickers, period=period)
 
-    # 2. Metadata desde yfinance .info
-    eq_meta = build_equity_metadata(list(eq_prices.columns))
-
-    # 3. Log-returns RV
+    # 2. Log-returns RV
     rets_eq = calculate_returns(eq_prices)
 
-    # 4. FICO sintético
+    # 3. FICO sintético
     rets_fi, fi_meta = build_synthetic_fico(fico_forced, rets_eq.index)
 
-    # 5. Consolidar
+    # 4. Benchmark (antes de metadata, para poder calcular beta por regresión)
+    idx = _remove_timezone(pd.to_datetime(rets_eq.index))
+    start = (idx.min() - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
+    end = (idx.max() + pd.Timedelta(days=30)).strftime("%Y-%m-%d")
+    bmk_ret = download_benchmark(start=start, end=end)
+    bmk_ret.index = _remove_timezone(bmk_ret.index)
+
+    # 5. Metadata — pasa returns + benchmark para fallback de beta por regresión
+    rets_eq_tz = rets_eq.copy()
+    rets_eq_tz.index = _remove_timezone(rets_eq_tz.index)
+    eq_meta = build_equity_metadata(
+        list(eq_prices.columns),
+        asset_returns=rets_eq_tz,
+        benchmark_returns=bmk_ret,
+    )
+
+    # 6. Consolidar
     returns = pd.concat([rets_eq, rets_fi], axis=1, join="outer")
     returns = returns.replace([np.inf, -np.inf], np.nan).dropna(how="all").fillna(0.0)
 
@@ -338,15 +415,8 @@ def load_full_universe(equity_tickers, fico_forced=None, period="5y"):
     fico_assets = list(fico_forced.keys())
     asset_metadata = pd.concat([eq_meta, fi_meta], axis=0).reindex(returns.columns)
 
-    # 6. Benchmark
-    idx = _remove_timezone(pd.to_datetime(returns.index))
-    start = (idx.min() - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
-    end = (idx.max() + pd.Timedelta(days=30)).strftime("%Y-%m-%d")
-    bmk_ret = download_benchmark(start=start, end=end)
-
     # 7. Alinear
     returns.index = _remove_timezone(returns.index)
-    bmk_ret.index = _remove_timezone(bmk_ret.index)
     returns, bmk_ret = returns.align(bmk_ret, join="inner", axis=0)
 
     return returns, equity_assets, fico_assets, asset_metadata, bmk_ret
