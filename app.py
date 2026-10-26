@@ -25,7 +25,7 @@ from engine import (
     PROFILE_EXCLUSIONS, FIXED_PROFILES, FIVE_PROFILE_BETA_MAP,
     FICO_USD, FICO_PEN, FICO_FORCED,
     # Functions
-    load_full_universe, get_market_cap_weights, calibrate_market,
+    load_full_universe, read_excel_tickers, get_market_cap_weights, calibrate_market,
     build_views, black_litterman_posterior, select_equity_for_profile,
     optimize_frontier, pick_portfolio, performance_metrics,
     calculate_drawdown, cumulative_return_for_period,
@@ -59,6 +59,29 @@ with st.sidebar:
     sheet_name = st.text_input("Hoja", value="USD")
     period = st.selectbox("Historia de precios (Yahoo)", ["3y", "5y", "10y", "max"], index=1,
                           help="Cuántos años de precios descargar de Yahoo Finance")
+
+    # ── Pre-leer tickers del Excel para el selector de activos ────────────
+    selected_tickers = None
+    if uploaded_file is not None:
+        try:
+            import tempfile, os
+            with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as _f:
+                _f.write(uploaded_file.getvalue())
+                _tmp = _f.name
+            all_tickers, _ = read_excel_tickers(_tmp, sheet_name)
+            os.unlink(_tmp)
+
+            st.subheader("✅ Activos a incluir")
+            selected_tickers = st.multiselect(
+                "Selecciona qué activos entran a la optimización",
+                options=all_tickers,
+                default=all_tickers,
+                help="Por defecto se incluyen todos. Deselecciona los que no quieras optimizar."
+            )
+            if not selected_tickers:
+                st.warning("⚠️ Selecciona al menos 1 activo.")
+        except Exception as e:
+            st.caption(f"(No se pudieron leer tickers aún: {e})")
 
     st.subheader("⏱️ Horizonte de inversión")
     HORIZON_OPTIONS = {
@@ -108,13 +131,14 @@ with st.sidebar:
 # ═════════════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=3600, show_spinner="Cargando Excel + precios de Yahoo...")
-def cached_load(_file_bytes, _sheet, _period, _fico_dict):
+def cached_load(_file_bytes, _sheet, _period, _fico_dict, _selected):
     import tempfile, os
     with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
         f.write(_file_bytes)
         tmp = f.name
     try:
-        return load_full_universe(tmp, sheet_name=_sheet, fico_forced=_fico_dict, period=_period)
+        return load_full_universe(tmp, sheet_name=_sheet, fico_forced=_fico_dict,
+                                  period=_period, selected_tickers=_selected)
     finally:
         os.unlink(tmp)
 
@@ -129,8 +153,9 @@ if uploaded_file is not None and run_btn:
 
     with st.spinner("📊 Cargando Excel + descargando precios de Yahoo..."):
         try:
+            sel_tuple = tuple(selected_tickers) if selected_tickers else None
             returns, eq_assets, fico_assets, metadata, bmk = cached_load(
-                uploaded_file.getvalue(), sheet_name, period, fico_forced
+                uploaded_file.getvalue(), sheet_name, period, fico_forced, sel_tuple
             )
             st.session_state.returns = returns
             st.session_state.equity_assets = eq_assets
