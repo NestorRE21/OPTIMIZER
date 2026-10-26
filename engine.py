@@ -235,48 +235,28 @@ def download_equity_prices(tickers, period="5y"):
     return prices
 
 
+# ── Catálogo estático de tickers — yf.Ticker().info no funciona en Streamlit Cloud
 def build_equity_metadata(tickers):
-    """Construye metadata (sector, beta, moneda, región) desde yfinance .info.
-
-    Usa reintentos y delay para evitar rate-limiting en Streamlit Cloud.
-    """
-    import time
-
+    """Construye metadata (sector, beta, moneda, región) desde yfinance .info."""
     meta_rows = []
-    for i, ticker in enumerate(tickers):
+    for ticker in tickers:
         row = {
             "asset": ticker, "sector": "Sin clasificar",
             "region": "Sin clasificar", "moneda": "USD",
             "instrumento": "EQUITY", "beta": np.nan,
             "asset_class": "Renta Variable", "fuente": "yfinance",
         }
-
-        # Intentar hasta 2 veces con delay
-        for attempt in range(2):
-            try:
-                tk = yf.Ticker(ticker)
-                info = tk.info
-                if info and isinstance(info, dict) and len(info) > 5:
-                    row["sector"]      = info.get("sector") or info.get("industry") or "Sin clasificar"
-                    row["region"]      = info.get("country", "Sin clasificar")
-                    row["moneda"]      = info.get("currency", "USD")
-                    row["instrumento"] = info.get("quoteType", "EQUITY")
-                    row["beta"]        = info.get("beta", np.nan)
-                    if row["beta"] is None:
-                        row["beta"] = np.nan
-                    break
-                else:
-                    # .info devolvió dict vacío o mínimo — reintentar
-                    time.sleep(0.5)
-            except Exception:
-                time.sleep(0.5)
-
+        try:
+            info = yf.Ticker(ticker).info or {}
+            row["sector"]      = info.get("sector") or info.get("industry") or info.get("category") or "Sin clasificar"
+            row["region"]      = info.get("country") or "Sin clasificar"
+            row["moneda"]      = info.get("currency") or "USD"
+            row["instrumento"] = info.get("quoteType") or "EQUITY"
+            beta_val           = info.get("beta") or info.get("beta3Year")
+            row["beta"]        = float(beta_val) if beta_val is not None else np.nan
+        except Exception:
+            pass
         meta_rows.append(row)
-
-        # Delay entre tickers para no saturar la API
-        if i < len(tickers) - 1:
-            time.sleep(0.3)
-
     return pd.DataFrame(meta_rows).set_index("asset")
 
 
