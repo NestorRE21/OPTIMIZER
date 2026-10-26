@@ -724,10 +724,19 @@ def performance_metrics(log_returns, benchmark=None):
 # EXPORTACIÓN A EXCEL — formato Coril SAB
 # ═════════════════════════════════════════════════════════════════════════════
 
+def project_to_horizon(ann_ret, ann_vol, rf_annual, horizon_years):
+    """Proyecta métricas anuales al horizonte de inversión."""
+    ret_h = (1.0 + ann_ret) ** horizon_years - 1.0
+    vol_h = ann_vol * np.sqrt(horizon_years)
+    rf_h  = (1.0 + rf_annual) ** horizon_years - 1.0
+    sharpe_h = (ret_h - rf_h) / vol_h if vol_h > EPS else np.nan
+    return {"ret_horizon": ret_h, "vol_horizon": vol_h, "rf_horizon": rf_h, "sharpe_horizon": sharpe_h}
+
+
 def export_portfolio_xlsx(
     weights, profile_name, ret_bl, sigma_bl, asset_metadata,
     hist_returns, benchmark_returns, fico_forced=None,
-    punto_idx=None,
+    punto_idx=None, horizon_years=1.0, horizon_label="1 año",
 ):
     """
     Genera un archivo Excel en memoria (BytesIO) con formato Coril SAB.
@@ -879,6 +888,30 @@ def export_portfolio_xlsx(
             cell.fill = rf(); cell.font = FB; cell.border = CB
             cell.alignment = AL if ci == 1 else AR
             if ci in {2,3,4} and isinstance(cell.value, float): cell.number_format = "0.00%"
+    # Bloque de proyección al horizonte
+    ws.append([])
+    ws.append([f"PROYECCIÓN AL HORIZONTE ({horizon_label})", "Portafolio", bmk_name, "Diferencia", ""])
+    proj_header_row = ws.max_row
+    style_header(ws, proj_header_row)
+    proj_p = project_to_horizon(ann_ret_p, ann_vol_p, RF_ANNUAL, horizon_years)
+    proj_b = project_to_horizon(ann_ret_b, ann_vol_b, RF_ANNUAL, horizon_years)
+    for r in [
+        (f"Ret. esperado ({horizon_label})", proj_p["ret_horizon"], proj_b["ret_horizon"],
+         proj_p["ret_horizon"] - proj_b["ret_horizon"]),
+        (f"Volatilidad ({horizon_label})", proj_p["vol_horizon"], proj_b["vol_horizon"],
+         proj_p["vol_horizon"] - proj_b["vol_horizon"]),
+        (f"Sharpe ({horizon_label})", proj_p["sharpe_horizon"], proj_b["sharpe_horizon"],
+         proj_p["sharpe_horizon"] - proj_b["sharpe_horizon"]),
+        (f"Rf ({horizon_label})", proj_p["rf_horizon"], proj_p["rf_horizon"], 0.0),
+    ]:
+        ws.append([r[0], r[1], r[2], r[3], ""])
+    for row in ws.iter_rows(min_row=proj_header_row+1, max_row=proj_header_row+4):
+        for ci, cell in enumerate(row, 1):
+            cell.fill = rf(); cell.font = FB; cell.border = CB
+            cell.alignment = AL if ci == 1 else AR
+            if ci in {2,3,4} and isinstance(cell.value, float):
+                cell.number_format = "0.00%"
+
     autofit(ws); ws.freeze_panes = "A5"
 
     # ═══ Hoja 2: Composición ═══
